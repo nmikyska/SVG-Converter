@@ -19,6 +19,8 @@ export default function App() {
   const [smoothRadius, setSmoothRadius] = useState(1);
   const [isSharpening, setIsSharpening] = useState(false);
   const [contrastAmount, setContrastAmount] = useState(150);
+  const [isRefining, setIsRefining] = useState(false);
+  const [isHighPrecision, setIsHighPrecision] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -47,6 +49,51 @@ export default function App() {
     }
   }, []);
 
+  const refineImageProcess = (imageSrc: string): Promise<string> => {
+    return new Promise((resolve) => {
+      // Pre-trace to create a clean, smoothed version of the image
+      ImageTracer.imageToSVG(
+        imageSrc,
+        (svgstr: string) => {
+          const img = new Image();
+          const svgBlob = new Blob([svgstr], { type: 'image/svg+xml;charset=utf-8' });
+          const url = URL.createObjectURL(svgBlob);
+          
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            // Upscale for better precision in the next step
+            canvas.width = img.width * 2;
+            canvas.height = img.height * 2;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.imageSmoothingEnabled = true;
+              ctx.imageSmoothingQuality = 'high';
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              resolve(canvas.toDataURL('image/png'));
+            } else {
+              resolve(imageSrc);
+            }
+            URL.revokeObjectURL(url);
+          };
+          img.onerror = () => {
+            resolve(imageSrc);
+            URL.revokeObjectURL(url);
+          };
+          img.src = url;
+        },
+        { 
+          numberofcolors: 32,
+          ltres: 0.1,
+          qtres: 0.1,
+          pathomit: 1,
+          blurradius: 3, // More rounding in pre-trace
+          blurdelta: 20
+        }
+      );
+    });
+  };
+
   const processImage = (imageSrc: string, blur: number, contrast: number): Promise<string> => {
     return new Promise((resolve) => {
       const img = new Image();
@@ -60,10 +107,23 @@ export default function App() {
           // Apply filters: Blur first to smooth, then Contrast to sharpen/crispen edges
           let filter = '';
           if (isSmoothing) filter += `blur(${blur}px) `;
-          if (isSharpening) filter += `contrast(${contrast}%) `;
+          // Use very high contrast for "perfect" black/white edges
+          if (isSharpening) filter += `contrast(${contrast * 2}%) brightness(105%) `;
           
           ctx.filter = filter.trim() || 'none';
           ctx.drawImage(img, 0, 0);
+
+          // Optional: Manual thresholding for pure black/white
+          if (isSharpening && contrast > 200) {
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            for (let i = 0; i < data.length; i += 4) {
+              const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+              const val = avg > 128 ? 255 : 0;
+              data[i] = data[i + 1] = data[i + 2] = val;
+            }
+            ctx.putImageData(imageData, 0, 0);
+          }
           
           resolve(canvas.toDataURL('image/png'));
         } else {
@@ -82,8 +142,14 @@ export default function App() {
     try {
       let processingImage = image;
       
+      // 1. Smart Refine (Pre-trace)
+      if (isRefining) {
+        processingImage = await refineImageProcess(processingImage);
+      }
+
+      // 2. Filter Processing (Smooth/Sharpen)
       if (isSmoothing || isSharpening) {
-        processingImage = await processImage(image, smoothRadius, contrastAmount);
+        processingImage = await processImage(processingImage, smoothRadius, contrastAmount);
       }
 
       // Small delay to ensure UI updates
@@ -104,11 +170,12 @@ export default function App() {
         { 
           numberofcolors: colors,
           viewbox: true,
-          ltres: 1,
-          qtres: 1,
-          pathomit: 8,
+          ltres: isHighPrecision ? 0.05 : 1,
+          qtres: isHighPrecision ? 0.05 : 1,
+          pathomit: isHighPrecision ? 1 : 8,
           blurradius: isSmoothing ? smoothRadius : 0,
-          blurdelta: 20
+          blurdelta: 20,
+          colorsampling: 2 // Best quality
         }
       );
     } catch (error) {
@@ -302,6 +369,36 @@ export default function App() {
                                 className="w-full h-2 bg-neutral-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
                               />
                               <p className="text-[10px] text-neutral-400 mt-1">Higher values preserve more detail but increase file size.</p>
+                            </div>
+
+                            <div className="pt-4 border-t border-neutral-100">
+                              <div className="flex items-center justify-between mb-4">
+                                <div className="flex flex-col">
+                                  <label className="text-sm font-medium text-neutral-700">High Precision</label>
+                                  <span className="text-[10px] text-neutral-400">Ultra-fine path tracing (slower)</span>
+                                </div>
+                                <button 
+                                  onClick={() => setIsHighPrecision(!isHighPrecision)}
+                                  className={`w-10 h-5 rounded-full transition-colors relative ${isHighPrecision ? 'bg-blue-600' : 'bg-neutral-200'}`}
+                                >
+                                  <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isHighPrecision ? 'left-6' : 'left-1'}`}></div>
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="pt-4 border-t border-neutral-100">
+                              <div className="flex items-center justify-between mb-4">
+                                <div className="flex flex-col">
+                                  <label className="text-sm font-medium text-neutral-700">Smart Refine</label>
+                                  <span className="text-[10px] text-neutral-400">Pre-traces edges for perfect curves</span>
+                                </div>
+                                <button 
+                                  onClick={() => setIsRefining(!isRefining)}
+                                  className={`w-10 h-5 rounded-full transition-colors relative ${isRefining ? 'bg-blue-600' : 'bg-neutral-200'}`}
+                                >
+                                  <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isRefining ? 'left-6' : 'left-1'}`}></div>
+                                </button>
+                              </div>
                             </div>
 
                             <div className="pt-4 border-t border-neutral-100">
