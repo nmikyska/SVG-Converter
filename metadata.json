@@ -1,0 +1,5 @@
+{
+  "name": "PNG to SVG Converter",
+  "description": "Upload a PNG image and convert it into a scalable SVG vector graphic using advanced tracing.",
+  "requestFramePermissions": []
+}
